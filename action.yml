@@ -48,6 +48,11 @@ inputs:
       JSON array of reminder GUIDs to cancel (required for 'cancel' action).
       Example: '["abc-123", "def-456"]'
     required: false
+  org-id:
+    description: >
+      Devin organization ID (required for v3 API). When set, the action uses
+      v3 org-scoped endpoints instead of v1.
+    required: false
   lock-mode:
     description: >
       Controls artifact-based locking to prevent race conditions.
@@ -78,6 +83,9 @@ outputs:
   popped-count:
     description: "Number of reminders removed after cron firing"
     value: ${{ steps.pop.outputs.popped_count }}
+  failed-count:
+    description: "Number of reminders that failed to fire (only set for cron action)"
+    value: ${{ steps.cron.outputs.failed_count }}
   cancelled-count:
     description: "Number of reminders cancelled (only set for cancel action)"
     value: ${{ steps.cancel-build.outputs.cancelled_count }}
@@ -437,6 +445,7 @@ runs:
       env:
         DUE_JSON: ${{ steps.list.outputs.due_json }}
         DEVIN_TOKEN: ${{ inputs.devin-token }}
+        ORG_ID: ${{ inputs.org-id }}
       run: |
         set -euo pipefail
 
@@ -444,6 +453,7 @@ runs:
         echo "Processing ${DUE_COUNT} due reminder(s)..."
 
         FIRED_GUIDS="[]"
+        FAILED_GUIDS="[]"
 
         for i in $(seq 0 $(( DUE_COUNT - 1 ))); do
           ITEM="$(echo "${DUE_JSON}" | jq -c ".[$i]")"
@@ -472,11 +482,19 @@ runs:
               "message": $message
             }')"
 
+          # Use v3 org-scoped endpoint when org-id is provided, otherwise fall back to v1
+          if [ -n "${ORG_ID}" ]; then
+            DEVIN_ID="devin-${SESSION_ID}"
+            API_URL="https://api.devin.ai/v3/organizations/${ORG_ID}/sessions/${DEVIN_ID}/messages"
+          else
+            API_URL="https://api.devin.ai/v1/sessions/${SESSION_ID}/message"
+          fi
+
           RESPONSE="$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
             -H "Authorization: Bearer ${DEVIN_TOKEN}" \
             -H "Content-Type: application/json" \
             -d "${PAYLOAD}" \
-            "https://api.devin.ai/v1/sessions/${SESSION_ID}/message" 2>&1)"
+            "${API_URL}" 2>&1)"
 
           HTTP_STATUS="$(echo "${RESPONSE}" | grep "HTTP_STATUS:" | cut -d':' -f2)"
           RESPONSE_BODY="$(echo "${RESPONSE}" | sed '/HTTP_STATUS:/d')"
@@ -489,7 +507,8 @@ runs:
           fi
 
           if [ "${RESPONSE}" = "API_CALL_FAILED" ]; then
-            echo "::warning::Failed to fire reminder ${GUID}"
+            echo "::error::Failed to fire reminder ${GUID}"
+            FAILED_GUIDS="$(echo "${FAILED_GUIDS}" | jq -c --arg g "${GUID}" '. + [$g]')"
           else
             echo "Reminder ${GUID} fired successfully"
             echo "Response: ${RESPONSE}"
@@ -500,6 +519,10 @@ runs:
         echo "fired_guids=$(echo "${FIRED_GUIDS}" | jq -c .)" | tee -a "$GITHUB_OUTPUT"
         FIRED_COUNT="$(echo "${FIRED_GUIDS}" | jq 'length')"
         echo "fired_count=${FIRED_COUNT}" | tee -a "$GITHUB_OUTPUT"
+
+        echo "failed_guids=$(echo "${FAILED_GUIDS}" | jq -c .)" | tee -a "$GITHUB_OUTPUT"
+        FAILED_COUNT="$(echo "${FAILED_GUIDS}" | jq 'length')"
+        echo "failed_count=${FAILED_COUNT}" | tee -a "$GITHUB_OUTPUT"
 
     - name: Slack notification (cron)
       if: steps.resolve.outputs.is_cron == 'true' && steps.cron.outputs.fired_count != '0' && steps.cron.outputs.fired_count != '' && inputs.slack-channel != ''
@@ -608,5 +631,12 @@ runs:
         if [ "${{ steps.list.outputs.due_count }}" = "0" ]; then
           echo "🔔 **Cron** at \`${{ steps.resolve.outputs.now }}\` — total ${{ steps.list.outputs.total_count }}, due 0." | tee -a "$GITHUB_STEP_SUMMARY"
         else
-          echo -e "🔔 **Cron** at \`${{ steps.resolve.outputs.now }}\`\n- total: ${{ steps.list.outputs.total_count }}\n- due: ${{ steps.list.outputs.due_count }}\n- fired: ${{ steps.cron.outputs.fired_count }}\n- popped: ${{ steps.pop.outputs.popped_count }}\n- remaining: ${{ steps.pop.outputs.remaining_count }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo -e "🔔 **Cron** at \`${{ steps.resolve.outputs.now }}\`\n- total: ${{ steps.list.outputs.total_count }}\n- due: ${{ steps.list.outputs.due_count }}\n- fired: ${{ steps.cron.outputs.fired_count }}\n- failed: ${{ steps.cron.outputs.failed_count }}\n- popped: ${{ steps.pop.outputs.popped_count }}\n- remaining: ${{ steps.pop.outputs.remaining_count }}" | tee -a "$GITHUB_STEP_SUMMARY"
         fi
+
+    - name: Fail if any reminders could not be delivered
+      if: steps.resolve.outputs.is_cron == 'true' && steps.cron.outputs.failed_count != '0' && steps.cron.outputs.failed_count != ''
+      shell: bash
+      run: |
+        echo "::error::${{ steps.cron.outputs.failed_count }} reminder(s) failed to fire. Failed GUIDs: ${{ steps.cron.outputs.failed_guids }}"
+        exit 1
