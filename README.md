@@ -26,6 +26,7 @@ A reusable GitHub Action for scheduling, listing, cancelling, and firing reminde
 | `reminder-timezone` | Timezone for displaying times in notifications. Accepts IANA names (e.g. `America/Los_Angeles`) or UTC offsets. Does not affect parsing of `remind-at`. | No | `UTC` |
 | `cancel-guids` | JSON array of reminder GUIDs to cancel. Required for `cancel`. | No | |
 | `lock-mode` | Controls artifact-based locking to prevent race conditions. `auto` locks on `put`, `cancel`, and `cron`, `none` disables locking, `always` locks on all actions including `list`. | No | `auto` |
+| `undeliverable-cc` | Slack user/group tags to CC when a reminder is dropped because its session is unreachable (HTTP 403/404/410), e.g. `<!subteam^S12345>`. Only used when `slack-channel` is set. | No | |
 
 ## Outputs
 
@@ -37,7 +38,9 @@ A reusable GitHub Action for scheduling, listing, cancelling, and firing reminde
 | `due-guids` | Newline-delimited list of GUIDs for due reminders |
 | `total-count` | Total number of reminders in the list |
 | `item-guid` | GUID of the newly added reminder (only for `put`) |
-| `popped-count` | Number of reminders removed after cron firing |
+| `popped-count` | Number of reminders removed after cron firing (fired + undeliverable) |
+| `failed-count` | Number of reminders that failed to fire and were kept for retry (only for `cron`) |
+| `undeliverable-count` | Number of reminders dropped because the target session returned HTTP 403/404/410 (only for `cron`) |
 | `cancelled-count` | Number of reminders cancelled (only for `cancel`) |
 
 ## Usage
@@ -45,7 +48,7 @@ A reusable GitHub Action for scheduling, listing, cancelling, and firing reminde
 ### Schedule a Reminder
 
 ```yaml
-- uses: aaronsteers/devin-reminders-action@v1
+- uses: airbytehq/devin-reminders-action@v1
   with:
     action: put
     remind-at: "2026-02-20T17:00:00-08:00"
@@ -60,7 +63,7 @@ A reusable GitHub Action for scheduling, listing, cancelling, and firing reminde
 ### List Reminders
 
 ```yaml
-- uses: aaronsteers/devin-reminders-action@v1
+- uses: airbytehq/devin-reminders-action@v1
   id: reminders
   with:
     action: list
@@ -74,7 +77,7 @@ A reusable GitHub Action for scheduling, listing, cancelling, and firing reminde
 Cancel by GUIDs for a session (requires `agent-session-url` + `cancel-guids`):
 
 ```yaml
-- uses: aaronsteers/devin-reminders-action@v1
+- uses: airbytehq/devin-reminders-action@v1
   with:
     action: cancel
     agent-session-url: "https://app.devin.ai/sessions/abc123"
@@ -141,7 +144,7 @@ jobs:
       actions: read
     steps:
       - name: Execute reminder action
-        uses: aaronsteers/devin-reminders-action@v0.4.0
+        uses: airbytehq/devin-reminders-action@v0.4.0
         with:
           action: 'list'
           reminder-timezone: America/Los_Angeles
@@ -156,7 +159,7 @@ jobs:
       actions: write
     steps:
       - name: Execute reminder action
-        uses: aaronsteers/devin-reminders-action@v0.4.0
+        uses: airbytehq/devin-reminders-action@v0.4.0
         with:
           action: 'put'
           lock-mode: auto
@@ -178,7 +181,7 @@ jobs:
       actions: write
     steps:
       - name: Execute reminder action
-        uses: aaronsteers/devin-reminders-action@v0.4.0
+        uses: airbytehq/devin-reminders-action@v0.4.0
         with:
           action: 'cancel'
           lock-mode: auto
@@ -198,7 +201,7 @@ jobs:
       actions: write
     steps:
       - name: Execute reminder action
-        uses: aaronsteers/devin-reminders-action@v0.4.0
+        uses: airbytehq/devin-reminders-action@v0.4.0
         with:
           action: 'cron'
           lock-mode: auto
